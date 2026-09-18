@@ -1,0 +1,786 @@
+"use client"
+
+import { useState, useEffect } from "react"
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Checkbox } from "@/components/ui/checkbox"
+import { UserPlus, CheckCircle2, ShieldAlert, Loader2, AlertTriangle, ArrowRight, FlaskConical, UserCheck, ArrowLeft, FileText, Download, X, Eye, Filter } from "lucide-react"
+import { addReferral } from "@/lib/store"
+
+export default function PHCIntakePage() {
+  const [consentCode, setConsentCode] = useState("")
+  const [consentStatus, setConsentStatus] = useState<"idle" | "requesting" | "approved" | "declined">("idle")
+  
+  // Manual Override states
+  const [showManualForm, setShowManualForm] = useState(false)
+  const [isManualOverride, setIsManualOverride] = useState(false)
+  const [manualFullName, setManualFullName] = useState("")
+  const [manualAge, setManualAge] = useState("")
+  const [manualGender, setManualGender] = useState("Male")
+  const [manualPhone, setManualPhone] = useState("")
+  const [manualGovtId, setManualGovtId] = useState("")
+
+  const [patientName, setPatientName] = useState("")
+  const [chiefComplaint, setChiefComplaint] = useState("")
+  const [selectedFlags, setSelectedFlags] = useState<string[]>([])
+  const [otherFlags, setOtherFlags] = useState("")
+  const [selectedDiag, setSelectedDiag] = useState("")
+  const [medicalHistory, setMedicalHistory] = useState<any[]>([])
+  const [activeReferrals, setActiveReferrals] = useState<any[]>([])
+  const [selectedReferralsToClose, setSelectedReferralsToClose] = useState<string[]>([])
+  
+  const [selectedRecordFilter, setSelectedRecordFilter] = useState("all")
+  const [selectedReportModal, setSelectedReportModal] = useState<any | null>(null)
+
+  const [lastAction, setLastAction] = useState<{ type: "treated" | "referred" | "error"; name: string } | null>(null)
+
+  const filteredHistory = medicalHistory.filter((rec, idx) => {
+    if (selectedRecordFilter === "all") return true
+    if (selectedRecordFilter === "reports") return !!rec.diagnostics
+    if (selectedRecordFilter === "opd") return rec.status === "Treated"
+    if (selectedRecordFilter === "referred") return rec.status === "Referred" || rec.status === "Admitted"
+    if (selectedRecordFilter.startsWith("item-")) {
+      const targetIdx = parseInt(selectedRecordFilter.replace("item-", ""), 10)
+      return idx === targetIdx
+    }
+    return true
+  })
+
+  useEffect(() => {
+    // Poll consent status if we are waiting for it
+    const fetchState = () => {
+       const currentConsent = JSON.parse(localStorage.getItem("medrelay.pending_consent") || "null")
+       if (currentConsent && consentStatus === "requesting") {
+          if (currentConsent.status === "approved") {
+             setConsentStatus("approved")
+             setIsManualOverride(false)
+             // Mock fetching patient name from ABHA
+             setPatientName("Aarav Kumar (Fetched via ABHA)")
+             localStorage.removeItem("medrelay.pending_consent")
+          } else if (currentConsent.status === "declined") {
+             setConsentStatus("declined")
+             localStorage.removeItem("medrelay.pending_consent")
+          }
+       }
+    }
+
+    fetchState()
+    const handleStorage = () => fetchState()
+    window.addEventListener("storage", handleStorage)
+    window.addEventListener("medrelay-consent-update", handleStorage)
+    const interval = setInterval(fetchState, 500)
+    return () => {
+      window.removeEventListener("storage", handleStorage)
+      window.removeEventListener("medrelay-consent-update", handleStorage)
+      clearInterval(interval)
+    }
+  }, [consentStatus])
+
+  useEffect(() => {
+     if (consentStatus === "approved") {
+        if (isManualOverride) {
+           // Manual override: do NOT load active referrals
+           setActiveReferrals([])
+           setSelectedReferralsToClose([])
+           setMedicalHistory([])
+        } else {
+           // Fetch Medical History once approved digitally via ABDM
+           const hist = JSON.parse(localStorage.getItem("medrelay.medical_history") || "[]")
+           hist.sort((a: any, b: any) => new Date(b.date).getTime() - new Date(a.date).getTime())
+           setMedicalHistory(hist)
+
+           // Check for active referrals to this PHC
+           const refs = JSON.parse(localStorage.getItem("medrelay.staffReferrals") || "[]")
+           const inboundRefs = refs.filter((r: any) => 
+             r.stages.some((s: any) => (s.status === "current" || s.status === "pending") && (s.facility.includes("Villianur") || s.facility.includes("PHC")))
+           )
+           if (inboundRefs.length > 0) {
+              setActiveReferrals(inboundRefs)
+              setSelectedReferralsToClose(inboundRefs.map((r: any) => r.id))
+           }
+        }
+     }
+  }, [consentStatus, isManualOverride])
+
+  const toggleFlag = (id: string) =>
+    setSelectedFlags(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+
+  const handleRequestConsent = (overrideCode?: string) => {
+    const code = (overrideCode || consentCode).trim().toUpperCase()
+    if (!code) return
+    setConsentCode(code)
+    setIsManualOverride(false)
+    setConsentStatus("requesting")
+    localStorage.setItem("medrelay.pending_consent", JSON.stringify({
+      facility: "Villianur Sub-Centre PHC, Pondicherry",
+      patientCode: code,
+      status: "pending",
+      timestamp: Date.now()
+    }))
+    window.dispatchEvent(new Event("storage"))
+    window.dispatchEvent(new CustomEvent("medrelay-consent-update"))
+  }
+
+  const handleManualOverrideSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!manualFullName.trim()) return
+
+    const details = [
+      manualAge ? `${manualAge} yrs` : null,
+      manualGender,
+      manualPhone ? `Ph: ${manualPhone}` : null
+    ].filter(Boolean).join(", ")
+
+    const formattedName = `${manualFullName.trim()} (${details})`
+    setPatientName(formattedName)
+    setIsManualOverride(true)
+    setActiveReferrals([])
+    setSelectedReferralsToClose([])
+    setShowManualForm(false)
+    setConsentStatus("approved")
+  }
+
+  const handleComplete = (type: "treated" | "referred") => {
+    if (selectedDiag) {
+      const pending = JSON.parse(localStorage.getItem("medrelay.pending_diagnostics") || "[]")
+      pending.push({
+        id: "REQ-" + Math.floor(Math.random() * 10000),
+        testName: selectedDiag,
+        source: "Villianur PHC, Pondicherry",
+        date: new Date().toLocaleString(),
+      })
+      localStorage.setItem("medrelay.pending_diagnostics", JSON.stringify(pending))
+    }
+
+    // Save to global Medical History
+    const history = JSON.parse(localStorage.getItem("medrelay.medical_history") || "[]")
+    history.push({
+      date: new Date().toISOString(),
+      facility: "Villianur PHC, Pondicherry",
+      chiefComplaint,
+      flags: [...selectedFlags, otherFlags].filter(Boolean),
+      diagnostics: selectedDiag,
+      actionTaken: type === "treated" ? "Treated in OPD" : "Referred to Indira Gandhi Govt Hospital, Pondicherry",
+      status: type === "treated" ? "Treated" : "Referred"
+    })
+    localStorage.setItem("medrelay.medical_history", JSON.stringify(history))
+
+    if (type === "referred") {
+      addReferral({
+        id: "REF-" + Math.floor(1000 + Math.random() * 9000),
+        reason: chiefComplaint || "Further treatment and diagnostics required",
+        createdAt: new Date().toLocaleString(),
+        stages: [
+          { label: "PHC Assessment", facility: "Villianur PHC, Pondicherry", status: "done", note: "Initial assessment completed." },
+          { label: "Hospital Triage", facility: "Indira Gandhi Govt Hospital, Pondicherry", status: "current" },
+          { label: "Specialist Consult", facility: "Indira Gandhi Govt Hospital, Pondicherry", status: "pending" }
+        ]
+      })
+    }
+
+    // Auto-close selected referrals only if digital consent intake with referrals
+    if (!isManualOverride && selectedReferralsToClose.length > 0) {
+       const refs = JSON.parse(localStorage.getItem("medrelay.staffReferrals") || "[]")
+       const updated = refs.map((r: any) => {
+          if (selectedReferralsToClose.includes(r.id)) {
+             const newStages = r.stages.map((s: any) => {
+                if (s.status === "current" || s.status === "pending") {
+                   return { ...s, status: "done", note: type === "treated" ? "Treated at PHC" : "Referred further", date: new Date().toLocaleString() }
+                }
+                return s
+             })
+             return { ...r, stages: newStages }
+          }
+          return r
+       })
+       localStorage.setItem("medrelay.staffReferrals", JSON.stringify(updated))
+       setActiveReferrals([])
+       setSelectedReferralsToClose([])
+    }
+
+    setLastAction({ type, name: patientName })
+    
+    // Reset Form
+    setConsentStatus("idle")
+    setShowManualForm(false)
+    setIsManualOverride(false)
+    setManualFullName("")
+    setManualAge("")
+    setManualGender("Male")
+    setManualPhone("")
+    setManualGovtId("")
+    setConsentCode("")
+    setPatientName("")
+    setChiefComplaint("")
+    setSelectedFlags([])
+    setOtherFlags("")
+    setSelectedDiag("")
+  }
+
+  return (
+    <div className="w-full max-w-7xl mx-auto space-y-6">
+      
+      <div>
+        <h1 className="text-3xl font-bold tracking-tight text-slate-900">Walk-in Patient Intake</h1>
+        <p className="text-slate-500 mt-1">Register new walk-in patients. Digital ABDM consent or manual registration required.</p>
+      </div>
+
+      {/* STAGE 1: CONSENT GATE / MANUAL OVERRIDE ENTRY */}
+      {consentStatus !== "approved" && (
+         <Card className="shadow-lg border-2 border-teal-500/20 max-w-4xl mx-auto">
+            <CardContent className="p-8 sm:p-12 text-center space-y-6">
+              
+              {showManualForm ? (
+                 <div className="max-w-lg mx-auto text-left space-y-6 animate-in fade-in zoom-in-95">
+                    <button 
+                       type="button" 
+                       onClick={() => setShowManualForm(false)}
+                       className="text-xs font-bold text-slate-500 hover:text-slate-900 flex items-center gap-1 mb-2"
+                    >
+                       <ArrowLeft size={14} /> Back to Code Access
+                    </button>
+
+                    <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
+                       <div className="w-10 h-10 bg-amber-100 text-amber-700 rounded-full flex items-center justify-center shrink-0 font-bold">
+                          <UserCheck size={20} />
+                       </div>
+                       <div>
+                          <h3 className="text-xl font-bold text-slate-900">Manual Patient Registration</h3>
+                          <p className="text-xs text-slate-500">For patients without smartphones or digital consent access</p>
+                       </div>
+                    </div>
+
+                    <form onSubmit={handleManualOverrideSubmit} className="space-y-4">
+                       <div>
+                          <Label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Patient Full Name *</Label>
+                          <Input 
+                             required
+                             type="text" 
+                             placeholder="e.g. Aarav Kumar"
+                             value={manualFullName}
+                             onChange={e => setManualFullName(e.target.value)}
+                             className="mt-1.5 font-medium"
+                          />
+                       </div>
+
+                       <div className="grid grid-cols-2 gap-4">
+                          <div>
+                             <Label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Age</Label>
+                             <Input 
+                                type="number" 
+                                placeholder="e.g. 35"
+                                value={manualAge}
+                                onChange={e => setManualAge(e.target.value)}
+                                className="mt-1.5 font-medium"
+                             />
+                          </div>
+                          <div>
+                             <Label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Gender</Label>
+                             <select 
+                                value={manualGender}
+                                onChange={e => setManualGender(e.target.value)}
+                                className="w-full mt-1.5 h-10 px-3 border border-slate-200 rounded-md text-sm font-medium focus:outline-none focus:ring-2 focus:ring-teal-500 bg-white"
+                             >
+                                <option value="Male">Male</option>
+                                <option value="Female">Female</option>
+                                <option value="Other">Other</option>
+                             </select>
+                          </div>
+                       </div>
+
+                       <div className="grid grid-cols-2 gap-4">
+                          <div>
+                             <Label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Phone / Caretaker Contact</Label>
+                             <Input 
+                                type="tel" 
+                                placeholder="e.g. 9876543210"
+                                value={manualPhone}
+                                onChange={e => setManualPhone(e.target.value)}
+                                className="mt-1.5 font-medium"
+                             />
+                          </div>
+                          <div>
+                             <Label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Govt ID / Aadhaar (Optional)</Label>
+                             <Input 
+                                type="text" 
+                                placeholder="e.g. XXXX-XXXX-1234"
+                                value={manualGovtId}
+                                onChange={e => setManualGovtId(e.target.value)}
+                                className="mt-1.5 font-medium"
+                             />
+                          </div>
+                       </div>
+
+                       <div className="pt-2 flex gap-3">
+                          <Button 
+                             type="button"
+                             variant="outline"
+                             onClick={() => setShowManualForm(false)}
+                             className="flex-1 py-5 text-sm font-bold"
+                          >
+                             Cancel
+                          </Button>
+                          <Button 
+                             type="submit" 
+                             className="flex-1 py-5 text-sm font-bold bg-teal-700 hover:bg-teal-800 text-white shadow-sm"
+                          >
+                             Proceed to Intake
+                          </Button>
+                       </div>
+                    </form>
+                 </div>
+              ) : (
+                 <>
+                   <div className="w-20 h-20 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <ShieldAlert size={40} />
+                   </div>
+                   
+                   {consentStatus === "idle" && (
+                      <div className="max-w-md mx-auto space-y-5">
+                        <h3 className="text-2xl font-black text-slate-900">Data Access Required</h3>
+                        <p className="text-slate-500 text-sm">To comply with ABDM privacy standards, fetch the patient's digital record using their Unique Code.</p>
+                        
+                        <div className="space-y-2">
+                          <input 
+                            type="text" 
+                            placeholder="Enter Patient Unique Code (e.g. PT-8891)"
+                            value={consentCode}
+                            onChange={e => setConsentCode(e.target.value.toUpperCase())}
+                            className="w-full text-center text-xl p-4 border-2 border-slate-200 rounded-xl focus:outline-none focus:border-teal-600 font-mono font-bold bg-slate-50 uppercase tracking-widest"
+                          />
+                          <div className="flex items-center justify-center gap-2">
+                            <span className="text-xs text-slate-400 font-medium">Testing demo?</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setConsentCode("PT-8891")
+                                handleRequestConsent("PT-8891")
+                              }}
+                              className="text-xs font-bold text-teal-700 hover:text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 px-3 py-1 rounded-full transition-all cursor-pointer shadow-xs"
+                            >
+                              ⚡ Auto-Fill & Request: PT-8891
+                            </button>
+                          </div>
+                        </div>
+
+                        <Button disabled={!consentCode} onClick={() => handleRequestConsent()} className="w-full bg-teal-700 hover:bg-teal-800 text-white py-6 text-lg rounded-xl shadow-sm font-bold">
+                           Request Access
+                        </Button>
+                        <div>
+                           <button 
+                             type="button" 
+                             onClick={() => setShowManualForm(true)} 
+                             className="text-slate-500 hover:text-teal-700 font-semibold text-sm mt-3 underline decoration-slate-300 underline-offset-4"
+                           >
+                              Patient does not have a smartphone? (Manual Override)
+                           </button>
+                        </div>
+                      </div>
+                   )}
+
+                   {consentStatus === "requesting" && (
+                     <div className="py-8 space-y-4">
+                        <Loader2 size={48} className="animate-spin text-teal-600 mx-auto" />
+                        <h3 className="text-xl font-bold text-slate-700">Waiting for patient approval...</h3>
+                        <p className="text-slate-500">A secure request has been sent to the patient's device.</p>
+                     </div>
+                   )}
+
+                   {consentStatus === "declined" && (
+                     <div className="py-8 space-y-6 max-w-sm mx-auto">
+                        <div className="p-4 bg-red-50 text-red-700 border border-red-200 rounded-xl flex items-center justify-center gap-2 font-bold">
+                           <AlertTriangle size={20} /> Access Denied by Patient
+                        </div>
+                        <Button onClick={() => setConsentStatus("idle")} variant="outline" className="w-full py-6 text-lg">Try Again</Button>
+                     </div>
+                   )}
+                 </>
+              )}
+            </CardContent>
+         </Card>
+      )}
+
+        {/* STAGE 2: INTAKE FORM (2-COLUMN LAYOUT) */}
+        {consentStatus === "approved" && (
+           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+             
+             {/* LEFT COLUMN: ACTIVE INTAKE FORM */}
+             <div className="lg:col-span-7 space-y-6">
+               <Card className="shadow-lg border-2 border-teal-500/20">
+                 <CardHeader className="bg-teal-50 border-b border-teal-100 flex flex-row items-center gap-4 py-6">
+                   <div className="w-12 h-12 rounded-full bg-teal-600 text-white flex items-center justify-center shadow-inner shrink-0">
+                      <UserPlus size={24} />
+                   </div>
+                   <div>
+                      <CardTitle className="text-2xl text-teal-900">Patient File: {patientName}</CardTitle>
+                      <CardDescription className="text-teal-700 font-medium">
+                         {isManualOverride ? "Manual Walk-in Registration (No Smartphone / Offline)" : "Access Granted via ABDM Consent Manager"}
+                      </CardDescription>
+                   </div>
+                 </CardHeader>
+
+                 <CardContent className="p-6 sm:p-8 space-y-6 bg-white">
+                   
+                   {/* Display Active Referrals (Only for ABDM Digital Consent) */}
+                   {!isManualOverride && activeReferrals.length > 0 && (
+                     <div className="bg-amber-50 p-5 rounded-xl border border-amber-200 shadow-sm animate-in zoom-in-95">
+                        <h3 className="text-sm font-bold text-amber-900 mb-3 flex items-center gap-2">
+                          <AlertTriangle size={18} /> Active Referrals Found for this Patient
+                        </h3>
+                        <p className="text-sm text-amber-800 mb-4">
+                           Please select the referrals you are addressing in this visit. They will be automatically completed.
+                        </p>
+                        <div className="space-y-2">
+                           {activeReferrals.map((ref: any) => (
+                              <div key={ref.id} className="flex items-start gap-3 bg-white p-3 rounded-lg border border-amber-100">
+                                 <Checkbox 
+                                    id={`ref-${ref.id}`}
+                                    checked={selectedReferralsToClose.includes(ref.id)}
+                                    onCheckedChange={(checked) => {
+                                       if (checked) {
+                                          setSelectedReferralsToClose(prev => [...prev, ref.id])
+                                       } else {
+                                          setSelectedReferralsToClose(prev => prev.filter(id => id !== ref.id))
+                                       }
+                                    }}
+                                 />
+                                 <div className="flex-1 -mt-1">
+                                    <label htmlFor={`ref-${ref.id}`} className="text-sm font-bold text-amber-900 cursor-pointer">{ref.id}</label>
+                                    <p className="text-xs text-amber-800 mt-0.5">{ref.reason}</p>
+                                 </div>
+                              </div>
+                           ))}
+                        </div>
+                     </div>
+                   )}
+
+                   {/* Form Controls */}
+                   <div className="space-y-4">
+                      <Label className="text-base font-bold text-slate-800">Chief Clinical Complaint / Symptoms</Label>
+                      <Input 
+                        placeholder="e.g. High fever for 3 days, acute abdominal pain, hypertension"
+                        value={chiefComplaint}
+                        onChange={e => setChiefComplaint(e.target.value)}
+                        className="p-4 text-base bg-slate-50 border-slate-200 rounded-xl"
+                      />
+                   </div>
+
+                   {/* Clinical Risk Flags */}
+                   <div className="space-y-4">
+                      <Label className="text-base font-bold text-slate-800">Clinical Triage Risk Flags</Label>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                         {[
+                           { id: "Maternal Risk", label: "Maternal Risk / High Risk Pregnancy" },
+                           { id: "Pediatric Emergency", label: "Pediatric Emergency" },
+                           { id: "Cardiac Distress", label: "Chest Pain / Cardiac" },
+                           { id: "Severe Trauma", label: "Severe Trauma / Accident" },
+                           { id: "Communicable Outbreak", label: "Fever Outbreak / Infectious" },
+                           { id: "Chronic Complications", label: "Diabetes / BP Crisis" },
+                         ].map((flag) => {
+                            const isSelected = selectedFlags.includes(flag.id)
+                            return (
+                               <div 
+                                 key={flag.id}
+                                 onClick={() => toggleFlag(flag.id)}
+                                 className={`p-3 rounded-xl border cursor-pointer text-xs font-bold transition-all flex items-center gap-2 ${
+                                    isSelected ? "bg-red-50 border-red-300 text-red-700 shadow-sm" : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
+                                 }`}
+                               >
+                                  <Checkbox checked={isSelected} onCheckedChange={() => toggleFlag(flag.id)} />
+                                  <span>{flag.label}</span>
+                               </div>
+                            )
+                         })}
+                      </div>
+                      <Input 
+                        placeholder="Other clinical observations or flags..."
+                        value={otherFlags}
+                        onChange={e => setOtherFlags(e.target.value)}
+                        className="bg-slate-50 border-slate-200"
+                      />
+                   </div>
+
+                   {/* Diagnostic Orders */}
+                   <div className="space-y-4">
+                      <Label className="text-base font-bold text-slate-800 flex items-center gap-2">
+                         <FlaskConical className="text-teal-600" size={18} /> Order OPD Diagnostics / Tests
+                      </Label>
+                      <select 
+                        value={selectedDiag} 
+                        onChange={e => setSelectedDiag(e.target.value)}
+                        className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 font-medium focus:outline-none focus:ring-2 focus:ring-teal-500"
+                      >
+                         <option value="">No Diagnostic Test Required</option>
+                         <option value="Complete Blood Count (CBC)">Complete Blood Count (CBC)</option>
+                         <option value="Malaria Rapid Diagnostic Test (RDT)">Malaria Rapid Diagnostic Test (RDT)</option>
+                         <option value="Dengue NS1 Antigen Test">Dengue NS1 Antigen Test</option>
+                         <option value="Chest X-Ray Digital">Chest X-Ray Digital</option>
+                         <option value="ECG (12-Lead)">ECG (12-Lead)</option>
+                         <option value="Blood Glucose (Random)">Blood Glucose (Random)</option>
+                      </select>
+                   </div>
+
+                   {/* Action Buttons */}
+                   <div className="pt-6 border-t border-slate-100 flex flex-col sm:flex-row gap-3">
+                      <Button 
+                        disabled={!chiefComplaint}
+                        onClick={() => handleComplete("treated")}
+                        className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white h-auto py-3.5 px-4 text-xs sm:text-sm font-bold leading-snug rounded-xl shadow-sm whitespace-normal text-center flex items-center justify-center min-w-0 shrink"
+                      >
+                         <CheckCircle2 size={18} className="mr-2 shrink-0" />
+                         <span>Mark as Treated (OPD Complete)</span>
+                      </Button>
+
+                      <Button 
+                        disabled={!chiefComplaint}
+                        onClick={() => handleComplete("referred")}
+                        className="flex-1 bg-teal-700 hover:bg-teal-800 text-white h-auto py-3.5 px-4 text-xs sm:text-sm font-bold leading-snug rounded-xl shadow-sm whitespace-normal text-center flex items-center justify-center min-w-0 shrink"
+                      >
+                         <ArrowRight size={18} className="mr-2 shrink-0" />
+                         <span>Refer to Indira Gandhi Govt Hospital</span>
+                      </Button>
+                   </div>
+
+                 </CardContent>
+               </Card>
+             </div>
+
+             {/* RIGHT COLUMN: SEPARATE PAST MEDICAL HISTORY & REPORTS COLUMN WITH DROPDOWN */}
+             <div className="lg:col-span-5 space-y-4">
+                <Card className="shadow-lg border-2 border-slate-200/80 bg-white overflow-hidden">
+                   <CardHeader className="bg-slate-50 border-b border-slate-200 p-5">
+                      <div className="flex items-center justify-between">
+                         <div className="flex items-center gap-2">
+                            <FileText size={18} className="text-teal-600" />
+                            <CardTitle className="text-sm font-black text-slate-800 uppercase tracking-wider">
+                               Past Medical History & Reports
+                            </CardTitle>
+                         </div>
+                         <span className="bg-teal-100 text-teal-800 border border-teal-200 text-xs font-bold px-2.5 py-0.5 rounded-full">
+                            {medicalHistory.length} Records
+                         </span>
+                      </div>
+                      <CardDescription className="text-xs text-slate-500 mt-1">
+                         Select or filter past consultations, ABDM records, and lab test reports below.
+                      </CardDescription>
+
+                      {/* Dropdown Selector */}
+                      <div className="mt-3">
+                         <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider block mb-1.5">
+                            Filter & Select Record / Report:
+                         </label>
+                         <select
+                            value={selectedRecordFilter}
+                            onChange={(e) => setSelectedRecordFilter(e.target.value)}
+                            className="w-full p-2.5 bg-white border-2 border-slate-200 rounded-xl text-xs font-bold text-slate-800 shadow-xs focus:outline-none focus:border-teal-500"
+                         >
+                            <option value="all">📋 All Past Records & Reports ({medicalHistory.length})</option>
+                            <option value="reports">🔬 Diagnostic Lab Reports Only</option>
+                            <option value="opd">🏥 OPD & Clinical Treatments</option>
+                            <option value="referred">🚑 Referrals & Transfers</option>
+                            <optgroup label="── Select Specific Record ──">
+                               {medicalHistory.map((rec: any, idx: number) => (
+                                  <option key={idx} value={`item-${idx}`}>
+                                     {new Date(rec.date).toLocaleDateString()} - {rec.chiefComplaint || "Consult"} ({rec.facility})
+                                  </option>
+                               ))}
+                            </optgroup>
+                         </select>
+                      </div>
+                   </CardHeader>
+
+                   <CardContent className="p-4 max-h-[640px] overflow-y-auto space-y-3">
+                      {filteredHistory.length === 0 ? (
+                         <div className="text-center py-8 text-slate-400 text-xs font-medium">
+                            No records match the selected dropdown filter.
+                         </div>
+                      ) : (
+                         filteredHistory.map((rec: any, idx: number) => (
+                            <div 
+                               key={idx} 
+                               className={`p-4 rounded-xl border transition-all text-xs space-y-2.5 ${
+                                  selectedRecordFilter === `item-${idx}` 
+                                     ? "bg-teal-50/80 border-teal-400 ring-2 ring-teal-500/20 shadow-sm" 
+                                     : "bg-white border-slate-200 hover:border-slate-300"
+                               }`}
+                            >
+                               <div className="flex justify-between items-start font-bold text-slate-900">
+                                  <span className="text-sm font-extrabold text-slate-900">{rec.chiefComplaint || "General Consult"}</span>
+                                  <span className="text-[11px] text-slate-400 font-normal shrink-0 ml-2">{new Date(rec.date).toLocaleDateString()}</span>
+                               </div>
+                               
+                               <div className="flex items-center justify-between text-slate-600 gap-2">
+                                  <span className="text-[11px] text-slate-500 font-medium truncate">Facility: {rec.facility}</span>
+                                  <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold shrink-0 ${
+                                     rec.status === "Treated" ? "bg-emerald-50 text-emerald-700 border border-emerald-200" :
+                                     rec.status === "Admitted" ? "bg-purple-50 text-purple-700 border border-purple-200" :
+                                     "bg-amber-50 text-amber-700 border border-amber-200"
+                                  }`}>
+                                     {rec.actionTaken || rec.status}
+                                  </span>
+                               </div>
+
+                               {/* Risk Flags */}
+                               {rec.flags && rec.flags.length > 0 && (
+                                  <div className="flex gap-1 flex-wrap pt-0.5">
+                                     {rec.flags.map((f: string, i: number) => (
+                                        <span key={i} className="bg-red-50 text-red-700 border border-red-200 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                                           {f}
+                                        </span>
+                                     ))}
+                                  </div>
+                               )}
+
+                               {/* Diagnostic Lab Report Button / Badge */}
+                               {rec.diagnostics && (
+                                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2">
+                                     <div className="flex items-center gap-1.5 text-teal-800 font-bold text-[11px] truncate">
+                                        <FlaskConical size={14} className="text-teal-600 shrink-0" />
+                                        <span className="truncate">{rec.diagnostics}</span>
+                                     </div>
+                                     <button
+                                        type="button"
+                                        onClick={() => setSelectedReportModal(rec)}
+                                        className="bg-teal-600 hover:bg-teal-700 text-white text-[11px] font-extrabold px-3 py-1.5 rounded-lg shadow-xs flex items-center gap-1.5 transition-colors shrink-0 cursor-pointer"
+                                     >
+                                        <FileText size={13} /> View Report
+                                     </button>
+                                  </div>
+                               )}
+                            </div>
+                         ))
+                      )}
+                   </CardContent>
+                </Card>
+             </div>
+
+           </div>
+        )}
+
+      {/* DIAGNOSTIC REPORT MODAL */}
+      {selectedReportModal && (
+         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in">
+            <div className="bg-white rounded-2xl max-w-xl w-full border border-slate-200 shadow-2xl overflow-hidden animate-in zoom-in-95">
+               <div className="bg-teal-700 text-white p-5 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                     <div className="p-2.5 bg-teal-800 rounded-xl">
+                        <FlaskConical size={22} />
+                     </div>
+                     <div>
+                        <h3 className="font-bold text-lg leading-snug">Diagnostic Lab & Clinical Report</h3>
+                        <p className="text-xs text-teal-200">Verified via ABDM Health Information Exchange</p>
+                     </div>
+                  </div>
+                  <button 
+                     onClick={() => setSelectedReportModal(null)} 
+                     className="text-teal-200 hover:text-white p-1.5 rounded-lg hover:bg-teal-800 transition-colors"
+                  >
+                     <X size={20} />
+                  </button>
+               </div>
+
+               <div className="p-6 space-y-5 text-sm">
+                  {/* Metadata Header */}
+                  <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200 text-xs">
+                     <div>
+                        <span className="text-slate-400 font-medium block">Patient Name & Code:</span>
+                        <span className="font-bold text-slate-900">{patientName || "Aarav Kumar"} (PT-8891)</span>
+                     </div>
+                     <div>
+                        <span className="text-slate-400 font-medium block">Facility / Source:</span>
+                        <span className="font-bold text-slate-900">{selectedReportModal.facility}</span>
+                     </div>
+                     <div>
+                        <span className="text-slate-400 font-medium block">Date & Time:</span>
+                        <span className="font-semibold text-slate-800">{new Date(selectedReportModal.date).toLocaleString()}</span>
+                     </div>
+                     <div>
+                        <span className="text-slate-400 font-medium block">Report ID:</span>
+                        <span className="font-mono font-bold text-teal-700">REP-{(selectedReportModal.id || "1042").slice(-6).toUpperCase()}</span>
+                     </div>
+                  </div>
+
+                  {/* Report Details Card */}
+                  <div className="space-y-3">
+                     <div className="flex justify-between items-center border-b border-slate-100 pb-2">
+                        <h4 className="font-bold text-slate-900 text-base flex items-center gap-2">
+                           <FileText size={18} className="text-teal-600" />
+                           {selectedReportModal.diagnostics || selectedReportModal.reportDetails?.testName || "Diagnostic Analysis"}
+                        </h4>
+                        <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${
+                           selectedReportModal.reportDetails?.status === "Critical Alert" || selectedReportModal.reportDetails?.status === "Abnormal"
+                              ? "bg-red-100 text-red-700 border border-red-200"
+                              : "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                        }`}>
+                           {selectedReportModal.reportDetails?.status || "Verified Result"}
+                        </span>
+                     </div>
+
+                     <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                        <table className="w-full text-left text-xs">
+                           <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-semibold uppercase tracking-wider">
+                              <tr>
+                                 <th className="p-3">Test Parameter</th>
+                                 <th className="p-3">Observed Result</th>
+                                 <th className="p-3">Reference Range</th>
+                              </tr>
+                           </thead>
+                           <tbody className="divide-y divide-slate-100 text-slate-800 font-medium">
+                              <tr>
+                                 <td className="p-3 font-semibold">{selectedReportModal.diagnostics || "Primary Test Marker"}</td>
+                                 <td className="p-3 font-bold text-teal-900">{selectedReportModal.reportDetails?.value || "Normal Findings"}</td>
+                                 <td className="p-3 text-slate-500">{selectedReportModal.reportDetails?.range || "Standard Clinical Limits"}</td>
+                              </tr>
+                           </tbody>
+                        </table>
+                     </div>
+
+                     {selectedReportModal.reportDetails?.notes && (
+                        <div className="bg-amber-50/70 border border-amber-200 p-3 rounded-xl text-xs text-amber-900">
+                           <span className="font-bold block mb-0.5">Clinical Note / Remarks:</span>
+                           <p>{selectedReportModal.reportDetails.notes}</p>
+                        </div>
+                     )}
+                  </div>
+
+                  {/* Verification Footer */}
+                  <div className="flex items-center gap-2 text-xs text-teal-700 bg-teal-50 p-3 rounded-xl border border-teal-200 font-medium">
+                     <CheckCircle2 size={16} className="text-teal-600 shrink-0" />
+                     <span>Report digitally signed and synchronized via Government Health Facility Registry (HFR).</span>
+                  </div>
+               </div>
+
+               <div className="bg-slate-50 border-t border-slate-200 p-4 flex justify-between items-center">
+                  <Button variant="outline" onClick={() => setSelectedReportModal(null)}>
+                     Close
+                  </Button>
+                  <Button onClick={() => window.print()} className="bg-teal-600 hover:bg-teal-700 text-white font-bold gap-2">
+                     <Download size={16} /> Print / Download PDF
+                  </Button>
+               </div>
+            </div>
+         </div>
+      )}
+
+      {/* Confirmation Toast */}
+      {lastAction && (
+         <div className="bg-slate-900 text-white p-4 rounded-xl shadow-xl flex items-center justify-between animate-in slide-in-from-bottom-5">
+            <div className="flex items-center gap-3">
+               <CheckCircle2 className="text-green-400" size={24} />
+               <div>
+                  <p className="font-bold">Record Created for {lastAction.name}</p>
+                  <p className="text-xs text-slate-400">
+                     Status: {lastAction.type === "treated" ? "Treated in OPD" : "Referred to Indira Gandhi Govt General Hospital, Pondicherry"}
+                  </p>
+               </div>
+            </div>
+            <Button size="sm" variant="ghost" onClick={() => setLastAction(null)} className="text-slate-400 hover:text-white">
+               Dismiss
+            </Button>
+         </div>
+      )}
+    </div>
+  )
+}
